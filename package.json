@@ -1,0 +1,26 @@
+{
+  "name": "jobverse-backend",
+  "version": "1.0.0",
+  "description": "Jobverse job discovery and AI scoring pipeline -- a self-contained Node.js replacement for the n8n workflow.",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test_flatten.js && node test_filters.js && node test_groq_parsing.js && node test_sources.js && node test_extraction.js && node test_intake_mapping.js && node test_drive_url.js && node test_run_discovery_integration.js",
+    "oauth:google": "node scripts/getGoogleRefreshToken.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^2.23.0",
+    "cors": "^2.8.6",
+    "docx": "^9.7.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "googleapis": "^178.0.0",
+    "mammoth": "^1.12.2",
+    "node-cron": "^4.6.0",
+    "pdf-parse": "^2.4.5"
+  }
+}
