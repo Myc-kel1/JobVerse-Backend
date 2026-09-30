@@ -1,10 +1,8 @@
-const {
-  randomUUID
-} = require("crypto");
+const { randomUUID } = require("crypto");
 
 const {
   readSheet,
-  upsertRows
+  upsertRows,
 } = require("../googleSheets");
 
 /*
@@ -14,7 +12,7 @@ const {
  */
 
 const {
-  extractCandidateEvidence
+  extractCandidateEvidence,
 } = require("./candidateEvidence");
 
 /*
@@ -32,7 +30,7 @@ const {
  */
 
 const {
-  evaluateJobRequirements
+  evaluateJobRequirements,
 } = require("./requirementEvaluation");
 
 /*
@@ -42,11 +40,11 @@ const {
  */
 
 const {
-  generateTailoredCV
+  generateTailoredCV,
 } = require("./cvGenerator");
 
 const {
-  generateTailoredCoverLetter
+  generateTailoredCoverLetter,
 } = require("./coverLetterGenerator");
 
 /*
@@ -59,7 +57,7 @@ const {
 
 const {
   validateGeneratedCV,
-  validateGeneratedCoverLetter
+  validateGeneratedCoverLetter,
 } = require("./localDocumentValidator");
 
 /*
@@ -70,7 +68,7 @@ const {
 
 const {
   renderCVDocx,
-  renderCoverLetterDocx
+  renderCoverLetterDocx,
 } = require("./documentRenderer");
 
 /*
@@ -80,12 +78,46 @@ const {
  */
 
 const {
-  uploadGeneratedDocument
+  uploadGeneratedDocument,
 } = require("./documentStorage");
 
 const {
-  ensureApplicationSheets
+  ensureApplicationSheets,
 } = require("./applicationSheets");
+
+/*
+ * ============================================================
+ * APPLICATION ELIGIBILITY / LIFECYCLE POLICY
+ * ============================================================
+ *
+ * All review/workspace/execution eligibility rules live in one
+ * central policy module.
+ *
+ * applicationService.js performs persistence and lifecycle
+ * operations, while applicationEligibilityService.js decides
+ * whether those operations are valid.
+ *
+ * This prevents lifecycle rules from being duplicated across:
+ *
+ * - API routes
+ * - frontend components
+ * - execution services
+ * - generation services
+ */
+
+const {
+  APPLICATION_STATUSES,
+  EXECUTION_STATUSES,
+
+  canEnterReview,
+  isApplicationWorkspaceEligible,
+
+  assertApplicationStatusTransition,
+
+  getApplicationEligibilitySummary
+} = require(
+  "./applicationEligibilityService"
+);
 
 /*
  * ============================================================
@@ -124,20 +156,143 @@ function uniqueStrings(values) {
   return [
     ...new Set(
       (values || [])
-        .map(
-          (value) =>
-            String(
-              value || ""
-            ).trim()
+        .map((value) =>
+          String(value || "").trim()
         )
         .filter(Boolean)
-    )
+    ),
   ];
 }
 
 /*
  * ============================================================
- * FINAL STATUS
+ * APPLICATION NORMALIZATION HELPERS
+ * ============================================================
+ *
+ * These helpers keep candidate/application comparisons
+ * consistent throughout this service.
+ */
+
+function normalizeEmail(
+  value
+) {
+  return String(
+    value || ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+
+function normalizeId(
+  value
+) {
+  return String(
+    value || ""
+  ).trim();
+}
+
+
+function normalizeStatus(
+  value
+) {
+  return String(
+    value || ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+
+/*
+ * ============================================================
+ * SAFE LIMIT
+ * ============================================================
+ *
+ * Prevent API callers from requesting unexpectedly large
+ * spreadsheet result sets.
+ */
+
+function normalizeListLimit(
+  value,
+  {
+    defaultValue = 50,
+    maxValue = 100
+  } = {}
+) {
+  const parsed =
+    Number(
+      value
+    );
+
+  if (
+    !Number.isFinite(
+      parsed
+    ) ||
+    parsed <= 0
+  ) {
+    return defaultValue;
+  }
+
+  return Math.min(
+    Math.floor(
+      parsed
+    ),
+    maxValue
+  );
+}
+
+function normalizeEmail(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeId(value) {
+  return String(value || "")
+    .trim();
+}
+
+/*
+ * ============================================================
+ * APPLICATION ELIGIBILITY ENRICHMENT
+ * ============================================================
+ *
+ * The frontend should not recreate lifecycle rules itself.
+ *
+ * Instead, when needed, the backend can return:
+ *
+ * application.eligibility.canEnterReview
+ * application.eligibility.visibleInApplications
+ * application.eligibility.canApprove
+ * application.eligibility.canExecute
+ *
+ * This keeps React focused on presentation rather than domain
+ * policy.
+ */
+
+function attachApplicationEligibility(
+  application
+) {
+  if (
+    !application
+  ) {
+    return null;
+  }
+
+  return {
+    ...application,
+
+    eligibility:
+      getApplicationEligibilitySummary(
+        application
+      )
+  };
+}
+
+/*
+ * ============================================================
+ * FINAL GENERATION STATUS
  * ============================================================
  */
 
@@ -161,31 +316,21 @@ function getApplicationStatus(
  * ============================================================
  */
 
-async function getCandidate(
-  email
-) {
+async function getCandidate(email) {
   const rows =
     await readSheet(
       "Candidates"
     );
 
   const normalizedEmail =
-    String(
-      email || ""
-    )
-      .trim()
-      .toLowerCase();
+    normalizeEmail(email);
 
   return (
     rows.find(
       (row) =>
-        String(
-          row.candidateEmail ||
-          ""
-        )
-          .trim()
-          .toLowerCase() ===
-        normalizedEmail
+        normalizeEmail(
+          row.candidateEmail
+        ) === normalizedEmail
     ) ||
     null
   );
@@ -203,7 +348,7 @@ async function getJobForCandidate(
 ) {
   const [
     detailsRows,
-    shortlistRows
+    shortlistRows,
   ] =
     await Promise.all([
       readSheet(
@@ -212,35 +357,28 @@ async function getJobForCandidate(
 
       readSheet(
         "Shortlisted Jobs"
-      )
+      ),
     ]);
 
   const normalizedEmail =
-    String(
-      candidateEmail || ""
-    )
-      .trim()
-      .toLowerCase();
+    normalizeEmail(
+      candidateEmail
+    );
 
   const normalizedJobId =
-    String(
-      jobId || ""
+    normalizeId(
+      jobId
     );
 
   const detail =
     detailsRows.find(
       (row) =>
-        String(
-          row.jobId || ""
-        ) ===
-          normalizedJobId &&
-        String(
-          row.candidateEmail ||
-          ""
-        )
-          .trim()
-          .toLowerCase() ===
-          normalizedEmail
+        normalizeId(
+          row.jobId
+        ) === normalizedJobId &&
+        normalizeEmail(
+          row.candidateEmail
+        ) === normalizedEmail
     );
 
   if (!detail) {
@@ -250,22 +388,22 @@ async function getJobForCandidate(
   const shortlist =
     shortlistRows.find(
       (row) =>
-        String(
-          row.jobId || ""
-        ) ===
-          normalizedJobId &&
-        String(
-          row.candidateEmail ||
-          ""
-        )
-          .trim()
-          .toLowerCase() ===
-          normalizedEmail
+        normalizeId(
+          row.jobId
+        ) === normalizedJobId &&
+        normalizeEmail(
+          row.candidateEmail
+        ) === normalizedEmail
     );
 
+  /*
+   * Job Details is the main source of the full job.
+   * Shortlisted Jobs is merged on top so stored shortlist
+   * information such as scores/status remains available.
+   */
   return {
     ...detail,
-    ...(shortlist || {})
+    ...(shortlist || {}),
   };
 }
 
@@ -275,9 +413,7 @@ async function getJobForCandidate(
  * ============================================================
  */
 
-async function persistApplication(
-  row
-) {
+async function persistApplication(row) {
   await upsertRows(
     "Generated Applications",
     [row],
@@ -285,6 +421,78 @@ async function persistApplication(
   );
 
   return row;
+}
+
+/*
+ * ============================================================
+ * EXISTING APPLICATION LOOKUP
+ * ============================================================
+ *
+ * Prevent accidental duplicate generation for a candidate/job
+ * combination that already has a usable generated application.
+ *
+ * Rejected applications are intentionally excluded so a failed
+ * generation may be retried.
+ */
+
+async function findExistingApplication(
+  candidateEmail,
+  jobId
+) {
+  const rows =
+    await readSheet(
+      "Generated Applications"
+    );
+
+  const normalizedEmail =
+    normalizeEmail(
+      candidateEmail
+    );
+
+  const normalizedJobId =
+    normalizeId(
+      jobId
+    );
+
+  /*
+   * These statuses indicate that generation already succeeded
+   * or the application has progressed beyond generation.
+   */
+  const reusableStatuses =
+    new Set([
+      "generated",
+      "under review",
+      "approved",
+      "applied",
+    ]);
+
+  return (
+    rows.find((row) => {
+      const sameCandidate =
+        normalizeEmail(
+          row.candidateEmail
+        ) === normalizedEmail;
+
+      const sameJob =
+        normalizeId(
+          row.jobId
+        ) === normalizedJobId;
+
+      const status =
+        String(
+          row.status || ""
+        )
+          .trim()
+          .toLowerCase();
+
+      return (
+        sameCandidate &&
+        sameJob &&
+        reusableStatuses.has(status)
+      );
+    }) ||
+    null
+  );
 }
 
 /*
@@ -300,15 +508,13 @@ function buildMissingRequirements(
     evaluation
       .requiredUnsupportedRequirements ||
     []
-  ).map(
-    (item) => ({
-      requirement:
-        item.requirement,
+  ).map((item) => ({
+    requirement:
+      item.requirement,
 
-      reason:
-        item.reason
-    })
-  );
+    reason:
+      item.reason,
+  }));
 }
 
 function buildKeyAlignmentPoints(
@@ -318,27 +524,25 @@ function buildKeyAlignmentPoints(
     evaluation
       .supportedRequiredRequirements ||
     []
-  ).map(
-    (item) => ({
-      requirement:
-        item.requirement,
+  ).map((item) => ({
+    requirement:
+      item.requirement,
 
-      evidence:
-        item.evidence,
+    evidence:
+      item.evidence,
 
-      reason:
-        item.reason,
+    reason:
+      item.reason,
 
-      priority:
-        item.priority,
+    priority:
+      item.priority,
 
-      relevance:
-        item.relevance,
+    relevance:
+      item.relevance,
 
-      evidenceStrength:
-        item.evidenceStrength
-    })
-  );
+    evidenceStrength:
+      item.evidenceStrength,
+  }));
 }
 
 function buildFactualWarnings(
@@ -397,7 +601,7 @@ function mergeWarnings(
     ...(
       additional ||
       []
-    )
+    ),
   ]);
 }
 
@@ -410,12 +614,37 @@ function mergeWarnings(
 async function generateApplicationForJob({
   candidateEmail,
   jobId,
-  applicationType = null
+  applicationType = null,
 }) {
   /*
-   * Ensure application-related sheets exist.
+   * Ensure all application-related spreadsheet tabs and
+   * headers exist.
    */
   await ensureApplicationSheets();
+
+  /*
+   * ==========================================================
+   * DUPLICATE GENERATION PROTECTION
+   * ==========================================================
+   *
+   * If this candidate/job already has a generated application
+   * that is still valid, return that application instead of
+   * spending AI credits and creating another record.
+   */
+
+  const existingApplication =
+    await findExistingApplication(
+      candidateEmail,
+      jobId
+    );
+
+  if (existingApplication) {
+    console.log(
+      `[Application] Existing application found: ${existingApplication.applicationId}`
+    );
+
+    return existingApplication;
+  }
 
   /*
    * ==========================================================
@@ -462,9 +691,13 @@ async function generateApplicationForJob({
     randomUUID();
 
   const now =
-    new Date().toISOString();
+    new Date()
+      .toISOString();
 
   let row = {
+    /*
+     * Identity
+     */
     applicationId,
 
     jobId:
@@ -485,10 +718,18 @@ async function generateApplicationForJob({
     overallScore:
       job.overallScore || "",
 
+    /*
+     * Generation type.
+     *
+     * This is NOT the same thing as applicationMethod.
+     */
     applicationType:
       applicationType ||
       "Standard",
 
+    /*
+     * Document generation state.
+     */
     cvStatus:
       "Pending",
 
@@ -513,6 +754,9 @@ async function generateApplicationForJob({
     coverLetterValidationStatus:
       "Pending",
 
+    /*
+     * Existing factual state.
+     */
     factualWarnings:
       "[]",
 
@@ -522,16 +766,86 @@ async function generateApplicationForJob({
     keyAlignmentPoints:
       "[]",
 
+    /*
+     * Main application lifecycle.
+     */
     status:
       "Generating",
+
+    /*
+     * ========================================================
+     * APPLICATION EXECUTION STATE
+     * ========================================================
+     *
+     * applicationMethod:
+     *   email
+     *   google_form
+     *   linkedin_easy_apply
+     *   ats_form
+     *   company_form
+     *   manual_only
+     *   unknown
+     *
+     * applicationMode:
+     *   manual
+     *   assisted
+     *   automatic
+     *
+     * executionStatus:
+     *   not_ready
+     *   ready
+     *   applying
+     *   needs_review
+     *   submitted
+     *   failed
+     */
+
+    applicationMethod:
+      "unknown",
+
+    applicationMode:
+      "assisted",
+
+    executionStatus:
+      "not_ready",
+
+    /*
+     * Initially use the stored job URL.
+     *
+     * applicationRouter.js can later replace this with a more
+     * precise application URL when one is detected.
+     */
+    applicationUrl:
+      job.url || "",
+
+    applicationRecipient:
+      "",
+
+    submittedAt:
+      "",
+
+    lastAttemptAt:
+      "",
+
+    attemptCount:
+      0,
+
+    confirmationReference:
+      "",
+
+    failureReason:
+      "",
 
     createdAt:
       now,
 
     updatedAt:
-      now
+      now,
   };
 
+  /*
+   * Persist immediately so generation progress remains visible.
+   */
   await persistApplication(
     row
   );
@@ -625,7 +939,8 @@ async function generateApplicationForJob({
       );
 
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -654,7 +969,8 @@ async function generateApplicationForJob({
       "Generating";
 
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -754,12 +1070,15 @@ async function generateApplicationForJob({
         "Invalid";
 
       row.cvText =
-        JSON.stringify(cv);
+        JSON.stringify(
+          cv
+        );
 
       row.factualWarnings =
         safeJson(
           mergeWarnings(
             row.factualWarnings,
+
             cvValidation
               .unsupportedClaims
           )
@@ -768,8 +1087,15 @@ async function generateApplicationForJob({
       row.status =
         "Rejected";
 
+      row.executionStatus =
+        "failed";
+
+      row.failureReason =
+        "Generated CV failed local validation.";
+
       row.updatedAt =
-        new Date().toISOString();
+        new Date()
+          .toISOString();
 
       await persistApplication(
         row
@@ -789,10 +1115,13 @@ async function generateApplicationForJob({
       "Valid";
 
     row.cvText =
-      JSON.stringify(cv);
+      JSON.stringify(
+        cv
+      );
 
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -812,7 +1141,8 @@ async function generateApplicationForJob({
       "Generating";
 
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -895,7 +1225,7 @@ async function generateApplicationForJob({
 
     /*
      * ========================================================
-     * FINAL COVER VALIDATION FAILURE
+     * FINAL COVER-LETTER VALIDATION FAILURE
      * ========================================================
      */
 
@@ -916,6 +1246,7 @@ async function generateApplicationForJob({
         safeJson(
           mergeWarnings(
             row.factualWarnings,
+
             coverValidation
               .unsupportedClaims
           )
@@ -924,8 +1255,15 @@ async function generateApplicationForJob({
       row.status =
         "Rejected";
 
+      row.executionStatus =
+        "failed";
+
+      row.failureReason =
+        "Generated cover letter failed local validation.";
+
       row.updatedAt =
-        new Date().toISOString();
+        new Date()
+          .toISOString();
 
       await persistApplication(
         row
@@ -935,7 +1273,7 @@ async function generateApplicationForJob({
     }
 
     /*
-     * Cover passed.
+     * Cover letter passed.
      */
 
     row.coverLetterStatus =
@@ -948,7 +1286,8 @@ async function generateApplicationForJob({
       cover.coverLetter;
 
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -1017,7 +1356,7 @@ async function generateApplicationForJob({
 
     const [
       cvFile,
-      coverLetterFile
+      coverLetterFile,
     ] =
       await Promise.all([
         uploadGeneratedDocument({
@@ -1028,7 +1367,7 @@ async function generateApplicationForJob({
             `${safeName}_${safeJob}_CV.docx`,
 
           mimeType:
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }),
 
         uploadGeneratedDocument({
@@ -1039,8 +1378,8 @@ async function generateApplicationForJob({
             `${safeName}_${safeJob}_Cover_Letter.docx`,
 
           mimeType:
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        })
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }),
       ]);
 
     /*
@@ -1064,7 +1403,9 @@ async function generateApplicationForJob({
       coverLetterFile.url;
 
     row.cvText =
-      JSON.stringify(cv);
+      JSON.stringify(
+        cv
+      );
 
     row.coverLetterText =
       cover.coverLetter;
@@ -1101,14 +1442,35 @@ async function generateApplicationForJob({
         )
       );
 
+    /*
+     * Existing generation status behavior remains intact.
+     */
     row.status =
       getApplicationStatus(
         row.cvValidationStatus,
         row.coverLetterValidationStatus
       );
 
+    /*
+     * Successful document generation does NOT mean that the
+     * application is ready to submit yet.
+     *
+     * The application must still be reviewed/approved.
+     */
+    if (
+      row.status ===
+      "Generated"
+    ) {
+      row.executionStatus =
+        "not_ready";
+
+      row.failureReason =
+        "";
+    }
+
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -1134,8 +1496,15 @@ async function generateApplicationForJob({
     row.status =
       "Rejected";
 
+    row.executionStatus =
+      "failed";
+
+    row.failureReason =
+      err?.message ||
+      String(err);
+
     /*
-     * Mark whichever stage was still active.
+     * Mark whichever generation stage was still active.
      */
 
     if (
@@ -1172,13 +1541,14 @@ async function generateApplicationForJob({
             `Generation error: ${
               err?.message ||
               String(err)
-            }`
+            }`,
           ]
         )
       );
 
     row.updatedAt =
-      new Date().toISOString();
+      new Date()
+        .toISOString();
 
     await persistApplication(
       row
@@ -1198,7 +1568,7 @@ async function listGeneratedApplications(
   candidateEmail,
   {
     status,
-    limit = 50
+    limit = 50,
   } = {}
 ) {
   let rows =
@@ -1207,22 +1577,16 @@ async function listGeneratedApplications(
     );
 
   const normalizedEmail =
-    String(
-      candidateEmail || ""
-    )
-      .trim()
-      .toLowerCase();
+    normalizeEmail(
+      candidateEmail
+    );
 
   rows =
     rows.filter(
       (row) =>
-        String(
-          row.candidateEmail ||
-          ""
-        )
-          .trim()
-          .toLowerCase() ===
-        normalizedEmail
+        normalizeEmail(
+          row.candidateEmail
+        ) === normalizedEmail
     );
 
   if (status) {
@@ -1259,19 +1623,267 @@ async function listGeneratedApplications(
   );
 
   const safeLimit =
-    Math.min(
-      Math.max(
-        Number(limit) ||
-        50,
-        1
-      ),
-      100
-    );
+  normalizeListLimit(
+    limit
+  );
 
   return rows.slice(
     0,
     safeLimit
   );
+}
+
+/*
+ * ============================================================
+ * LIST REVIEWABLE APPLICATIONS
+ * ============================================================
+ *
+ * PURPOSE
+ * ------------------------------------------------------------
+ *
+ * Returns applications that have successfully completed
+ * document generation and are eligible to ENTER review.
+ *
+ * These applications are still:
+ *
+ *     status = Generated
+ *
+ * They do NOT yet belong in the main Applications workspace.
+ *
+ * This function can later power a:
+ *
+ *     "Ready for Review"
+ *
+ * section or action in the Review Queue.
+ *
+ * ============================================================
+ */
+
+async function listReviewableApplications(
+  candidateEmail,
+  {
+    limit = 50
+  } = {}
+) {
+  await ensureApplicationSheets();
+
+  const normalizedEmail =
+    normalizeEmail(
+      candidateEmail
+    );
+
+  if (
+    !normalizedEmail
+  ) {
+    throw new Error(
+      "candidateEmail is required"
+    );
+  }
+
+  const rows =
+    await readSheet(
+      "Generated Applications"
+    );
+
+  /*
+   * Only records belonging to this candidate are considered.
+   */
+  const candidateRows =
+    rows.filter(
+      (row) =>
+        normalizeEmail(
+          row.candidateEmail
+        ) ===
+        normalizedEmail
+    );
+
+  /*
+   * canEnterReview() performs the authoritative checks:
+   *
+   * - status = Generated
+   * - CV exists
+   * - cover letter exists
+   */
+  const eligibleRows =
+    candidateRows.filter(
+      (row) =>
+        canEnterReview(
+          row
+        ).eligible
+    );
+
+  /*
+   * Most recently updated applications first.
+   */
+  eligibleRows.sort(
+    (a, b) =>
+      new Date(
+        b.updatedAt ||
+        b.createdAt ||
+        0
+      ) -
+      new Date(
+        a.updatedAt ||
+        a.createdAt ||
+        0
+      )
+  );
+
+  const safeLimit =
+    normalizeListLimit(
+      limit
+    );
+
+  return eligibleRows
+    .slice(
+      0,
+      safeLimit
+    )
+    .map(
+      attachApplicationEligibility
+    );
+}
+
+/*
+ * ============================================================
+ * LIST APPLICATIONS WORKSPACE RECORDS
+ * ============================================================
+ *
+ * PURPOSE
+ * ------------------------------------------------------------
+ *
+ * This is the authoritative data source for the frontend
+ * Applications workspace.
+ *
+ * A Generated application does NOT automatically appear here.
+ *
+ * Current workspace lifecycle:
+ *
+ *     Under Review
+ *          ↓
+ *       Approved
+ *          ↓
+ *        Applied
+ *
+ * Required generated documents must also still exist.
+ *
+ * ============================================================
+ */
+
+async function listWorkspaceApplications(
+  candidateEmail,
+  {
+    status,
+    limit = 50
+  } = {}
+) {
+  await ensureApplicationSheets();
+
+  const normalizedEmail =
+    normalizeEmail(
+      candidateEmail
+    );
+
+  if (
+    !normalizedEmail
+  ) {
+    throw new Error(
+      "candidateEmail is required"
+    );
+  }
+
+  let rows =
+    await readSheet(
+      "Generated Applications"
+    );
+
+  /*
+   * Candidate isolation.
+   */
+  rows =
+    rows.filter(
+      (row) =>
+        normalizeEmail(
+          row.candidateEmail
+        ) ===
+        normalizedEmail
+    );
+
+  /*
+   * ==========================================================
+   * AUTHORITATIVE WORKSPACE ELIGIBILITY FILTER
+   * ==========================================================
+   *
+   * This enforces:
+   *
+   * - Under Review / Approved / Applied lifecycle state
+   * - CV exists
+   * - Cover letter exists
+   *
+   * Generated applications are deliberately excluded.
+   */
+  rows =
+    rows.filter(
+      (row) =>
+        isApplicationWorkspaceEligible(
+          row
+        ).eligible
+    );
+
+  /*
+   * Optional workspace-status filter.
+   */
+  if (
+    status
+  ) {
+    const requestedStatus =
+      normalizeStatus(
+        status
+      );
+
+    rows =
+      rows.filter(
+        (row) =>
+          normalizeStatus(
+            row.status
+          ) ===
+          requestedStatus
+      );
+  }
+
+  rows.sort(
+    (a, b) =>
+      new Date(
+        b.updatedAt ||
+        b.createdAt ||
+        0
+      ) -
+      new Date(
+        a.updatedAt ||
+        a.createdAt ||
+        0
+      )
+  );
+
+  const safeLimit =
+    normalizeListLimit(
+      limit
+    );
+
+  /*
+   * Return backend-computed eligibility information.
+   *
+   * React should display these decisions rather than trying to
+   * calculate lifecycle rules itself.
+   */
+  return rows
+    .slice(
+      0,
+      safeLimit
+    )
+    .map(
+      attachApplicationEligibility
+    );
 }
 
 /*
@@ -1288,19 +1900,357 @@ async function getGeneratedApplication(
       "Generated Applications"
     );
 
+  const normalizedApplicationId =
+    normalizeId(
+      applicationId
+    );
+
   return (
     rows.find(
       (row) =>
-        String(
-          row.applicationId ||
-          ""
+        normalizeId(
+          row.applicationId
         ) ===
-        String(
-          applicationId ||
-          ""
-        )
+        normalizedApplicationId
     ) ||
     null
+  );
+}
+
+/*
+ * ============================================================
+ * GET APPLICATION WITH ELIGIBILITY
+ * ============================================================
+ *
+ * Intended primarily for API/frontend consumption.
+ *
+ * Internal services can continue using:
+ *
+ *     getGeneratedApplication()
+ *
+ * when they need the raw persistence record.
+ */
+
+async function getApplicationWithEligibility(
+  applicationId
+) {
+  const application =
+    await getGeneratedApplication(
+      applicationId
+    );
+
+  if (
+    !application
+  ) {
+    return null;
+  }
+
+  return attachApplicationEligibility(
+    application
+  );
+}
+
+/*
+ * ============================================================
+ * TRANSITION APPLICATION REVIEW STATUS
+ * ============================================================
+ *
+ * PURPOSE
+ * ------------------------------------------------------------
+ *
+ * Centralized persistence operation for candidate-controlled
+ * review transitions.
+ *
+ * Supported targets:
+ *
+ *     Under Review
+ *     Approved
+ *     Rejected
+ *
+ * IMPORTANT:
+ *
+ * Applied is NOT allowed through this function.
+ *
+ * An application becomes Applied only after a successful real
+ * application submission through applicationAttemptService.
+ *
+ * Generated is also NOT manually assignable.
+ *
+ * Generation itself owns the Generated status.
+ *
+ * ============================================================
+ */
+
+async function transitionApplicationReviewStatus(
+  applicationId,
+  requestedStatus
+) {
+  await ensureApplicationSheets();
+
+  const normalizedApplicationId =
+    normalizeId(
+      applicationId
+    );
+
+  if (
+    !normalizedApplicationId
+  ) {
+    throw new Error(
+      "applicationId is required"
+    );
+  }
+
+  const application =
+    await getGeneratedApplication(
+      normalizedApplicationId
+    );
+
+  if (
+    !application
+  ) {
+    throw new Error(
+      "Generated application not found"
+    );
+  }
+
+  /*
+   * ==========================================================
+   * ALLOWED USER REVIEW TARGETS
+   * ==========================================================
+   *
+   * Generated:
+   *     controlled by generation pipeline
+   *
+   * Applied:
+   *     controlled by confirmed application submission
+   */
+
+  const allowedReviewTargets =
+    new Set([
+      APPLICATION_STATUSES
+        .UNDER_REVIEW,
+
+      APPLICATION_STATUSES
+        .APPROVED,
+
+      APPLICATION_STATUSES
+        .REJECTED
+    ]);
+
+  const canonicalRequestedStatus =
+    Object.values(
+      APPLICATION_STATUSES
+    ).find(
+      (status) =>
+        normalizeStatus(
+          status
+        ) ===
+        normalizeStatus(
+          requestedStatus
+        )
+    );
+
+  if (
+    !canonicalRequestedStatus ||
+    !allowedReviewTargets.has(
+      canonicalRequestedStatus
+    )
+  ) {
+    throw new Error(
+      "Review status must be Under Review, Approved, or Rejected"
+    );
+  }
+
+  /*
+   * ==========================================================
+   * IDEMPOTENT REQUEST
+   * ==========================================================
+   *
+   * Repeating the same status request should not rewrite the
+   * row unnecessarily.
+   */
+
+  if (
+    normalizeStatus(
+      application.status
+    ) ===
+    normalizeStatus(
+      canonicalRequestedStatus
+    )
+  ) {
+    return attachApplicationEligibility(
+      application
+    );
+  }
+
+  /*
+   * ==========================================================
+   * CENTRAL POLICY CHECK
+   * ==========================================================
+   *
+   * This validates transitions such as:
+   *
+   * Generated -> Under Review
+   * Under Review -> Approved
+   * Under Review -> Rejected
+   * Approved -> Rejected
+   *
+   * and rejects invalid lifecycle jumps.
+   */
+
+  assertApplicationStatusTransition(
+    application,
+    canonicalRequestedStatus
+  );
+
+  const now =
+    new Date()
+      .toISOString();
+
+  const updated = {
+    ...application,
+
+    status:
+      canonicalRequestedStatus,
+
+    updatedAt:
+      now
+  };
+
+  /*
+   * ==========================================================
+   * EXECUTION STATE SYNCHRONIZATION
+   * ==========================================================
+   */
+
+  switch (
+    canonicalRequestedStatus
+  ) {
+    /*
+     * Entering review does NOT authorize job submission.
+     */
+    case APPLICATION_STATUSES
+      .UNDER_REVIEW:
+      updated.executionStatus =
+        EXECUTION_STATUSES
+          .NOT_READY;
+
+      break;
+
+
+    /*
+     * Approval explicitly unlocks execution.
+     */
+    case APPLICATION_STATUSES
+      .APPROVED:
+      updated.executionStatus =
+        EXECUTION_STATUSES
+          .READY;
+
+      /*
+       * Any old execution error should not continue displaying
+       * after a legitimate approval transition.
+       *
+       * Generation failures cannot reach this point because
+       * their application status is Rejected.
+       */
+      updated.failureReason =
+        "";
+
+      break;
+
+
+    /*
+     * Candidate rejection immediately removes execution
+     * eligibility.
+     */
+    case APPLICATION_STATUSES
+      .REJECTED:
+      updated.executionStatus =
+        EXECUTION_STATUSES
+          .NOT_READY;
+
+      break;
+
+
+    default:
+      /*
+       * Defensive branch.
+       */
+      throw new Error(
+        "Unsupported review lifecycle transition"
+      );
+  }
+
+  await persistApplication(
+    updated
+  );
+
+  return attachApplicationEligibility(
+    updated
+  );
+}
+
+/*
+ * ============================================================
+ * MOVE APPLICATION TO REVIEW
+ * ============================================================
+ *
+ * Candidate explicitly chooses to review a successfully
+ * generated application package.
+ */
+
+async function moveApplicationToReview(
+  applicationId
+) {
+  return transitionApplicationReviewStatus(
+    applicationId,
+    APPLICATION_STATUSES
+      .UNDER_REVIEW
+  );
+}
+
+
+/*
+ * ============================================================
+ * APPROVE APPLICATION
+ * ============================================================
+ *
+ * Approval means:
+ *
+ * - candidate reviewed generated documents
+ * - candidate accepts the application package
+ * - executionStatus becomes ready
+ */
+
+async function approveApplication(
+  applicationId
+) {
+  return transitionApplicationReviewStatus(
+    applicationId,
+    APPLICATION_STATUSES
+      .APPROVED
+  );
+}
+
+
+/*
+ * ============================================================
+ * REJECT APPLICATION
+ * ============================================================
+ *
+ * Candidate declines the prepared application.
+ *
+ * Rejected applications cannot be executed.
+ */
+
+async function rejectApplication(
+  applicationId
+) {
+  return transitionApplicationReviewStatus(
+    applicationId,
+    APPLICATION_STATUSES
+      .REJECTED
   );
 }
 
@@ -1310,14 +2260,100 @@ async function getGeneratedApplication(
  * ============================================================
  */
 
+/*
+ * ============================================================
+ * EXPORTS
+ * ============================================================
+ */
+
 module.exports = {
+  /*
+   * ==========================================================
+   * APPLICATION GENERATION
+   * ==========================================================
+   */
+
   generateApplicationForJob,
 
+
+  /*
+   * ==========================================================
+   * APPLICATION RETRIEVAL
+   * ==========================================================
+   */
+
+  /*
+   * All generation records.
+   */
   listGeneratedApplications,
+
+  /*
+   * Generated applications whose documents are complete and
+   * are eligible to enter review.
+   */
+  listReviewableApplications,
+
+  /*
+   * Actual Applications workspace:
+   *
+   * Under Review
+   * Approved
+   * Applied
+   *
+   * with required generated documents.
+   */
+  listWorkspaceApplications,
+
+  /*
+   * Raw persistence record.
+   */
   getGeneratedApplication,
+
+  /*
+   * API/domain-enriched record.
+   */
+  getApplicationWithEligibility,
+
+  findExistingApplication,
+
+
+  /*
+   * ==========================================================
+   * REVIEW LIFECYCLE
+   * ==========================================================
+   */
+
+  transitionApplicationReviewStatus,
+
+  moveApplicationToReview,
+  approveApplication,
+  rejectApplication,
+
+
+  /*
+   * ==========================================================
+   * APPLICATION ELIGIBILITY ENRICHMENT
+   * ==========================================================
+   */
+
+  attachApplicationEligibility,
+
+
+  /*
+   * ==========================================================
+   * CANDIDATE / JOB LOOKUPS
+   * ==========================================================
+   */
 
   getCandidate,
   getJobForCandidate,
+
+
+  /*
+   * ==========================================================
+   * FACTUAL GENERATION HELPERS
+   * ==========================================================
+   */
 
   buildFactualWarnings,
   buildMissingRequirements,

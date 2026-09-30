@@ -9,8 +9,7 @@ const { randomUUID } = require("crypto");
  * existing read operations.
  *
  * upsertRows:
- * NEWLY imported here so prospect/job statuses can be persisted
- * without requiring another inline import later.
+ * used for persistent updates.
  */
 const {
   readSheet,
@@ -34,6 +33,80 @@ const {
   "./application/applicationService"
 );
 
+const {
+  createApplicationAttempt,
+  getApplicationAttempt,
+  listApplicationAttempts,
+  startApplicationAttempt,
+  markAttemptNeedsReview,
+  failApplicationAttempt,
+  submitApplicationAttempt
+} = require(
+  "./application/applicationAttemptService"
+);
+
+const {
+  createApplicationReviewRouter
+} = require(
+  "./routes/applicationReviewRoutes"
+);
+
+const {
+  createApplicationQueryRouter
+} = require(
+  "./routes/applicationQueryRoutes"
+);
+
+const {
+  createApplicationQuestionRouter
+} = require(
+  "./routes/applicationQuestionRoutes"
+);
+
+/*
+ * ============================================================
+ * APPLICATION EXECUTION RESUME ROUTES
+ * ============================================================
+ */
+
+const {
+  createApplicationResumeRouter
+} = require(
+  "./routes/applicationResumeRoutes"
+);
+
+const {
+  getExecutionReadiness
+} = require(
+  "./application/execution/executionGuard"
+);
+
+const {
+  logApplicationGenerated,
+  logJobQueued,
+  logJobUnqueued,
+  logSearchStarted,
+  logSearchCompleted,
+  logSearchFailed,
+  listActivity
+} = require(
+  "./application/activityLogService"
+);
+
+const {
+  previewApplicationExecution,
+  startApplicationExecution
+} = require(
+  "./application/applicationExecutionService"
+);
+
+const {
+  ensureApplicationSheets
+} = require(
+  "./application/applicationSheets"
+);
+
+
 const runs =
   new Map();
 
@@ -41,41 +114,22 @@ const runs =
  * ============================================================
  * APPLICATION STATUSES
  * ============================================================
- *
- * EXISTING FLOW — UNCHANGED.
  */
-const APPLICATION_STATUSES =
-  new Set([
-    "Generated",
-    "Under Review",
-    "Approved",
-    "Rejected",
-    "Applied"
-  ]);
+
+/*
+ * Review-only statuses accepted by the normal application
+ * status endpoint.
+ *
+ * Generated is controlled by document generation.
+ * Applied is controlled by successful application submission.
+ */
 
 /*
  * ============================================================
  * JOB / PROSPECT STATUSES
  * ============================================================
- *
- * NEW.
- *
- * These are intentionally separate from application statuses.
- *
- * A prospect can be:
- *
- * New
- *   ↓
- * Queued
- *   ↓
- * Applied
- *
- * or:
- *
- * New
- *   ↓
- * Skipped
  */
+
 const JOB_STATUSES =
   new Set([
     "New",
@@ -88,9 +142,8 @@ const JOB_STATUSES =
  * ============================================================
  * SANITIZE CANDIDATE
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 function sanitizeCandidate(
   candidate
 ) {
@@ -113,9 +166,8 @@ function sanitizeCandidate(
  * ============================================================
  * SANITIZE JOB
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 function sanitizeJob(job) {
   return {
     ...job,
@@ -150,9 +202,8 @@ function sanitizeJob(job) {
  * ============================================================
  * SANITIZE APPLICATION
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 function sanitizeApplication(
   application
 ) {
@@ -193,9 +244,8 @@ function sanitizeApplication(
  * ============================================================
  * PARSE JSON ARRAY
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 function parseJsonArray(
   value
 ) {
@@ -227,9 +277,8 @@ function parseJsonArray(
  * ============================================================
  * GET CANDIDATE
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 async function getCandidate(
   email
 ) {
@@ -255,16 +304,8 @@ async function getCandidate(
  * ============================================================
  * EXISTING GET JOBS HELPER
  * ============================================================
- *
- * IMPORTANT:
- *
- * THIS IS DELIBERATELY LEFT UNCHANGED.
- *
- * The dashboard already depends on this returning Job[].
- *
- * We do not change its return shape because doing so could
- * break your existing dashboard flow.
  */
+
 async function getJobs(
   email,
   query = {}
@@ -357,28 +398,10 @@ async function getJobs(
 
 /*
  * ============================================================
- * NEW: PAGINATED JOB QUERY
+ * PAGINATED JOB QUERY
  * ============================================================
- *
- * This helper exists specifically for the frontend jobs API.
- *
- * Unlike getJobs(), candidateEmail is OPTIONAL.
- *
- * This gives us:
- *
- * GET /api/jobs
- *   → jobs across all candidates
- *
- * GET /api/jobs?candidateEmail=...
- *   → jobs for one candidate
- *
- * It also returns pagination metadata.
- *
- * IMPORTANT:
- *
- * We add this as a separate helper rather than changing
- * getJobs() so existing internal flows remain untouched.
  */
+
 async function getJobsPage(
   query = {}
 ) {
@@ -391,15 +414,7 @@ async function getJobsPage(
     rows.slice();
 
   /*
-   * ----------------------------------------------------------
-   * CANDIDATE FILTER
-   * ----------------------------------------------------------
-   *
-   * Optional.
-   *
-   * No candidateEmail means:
-   *
-   * All candidates.
+   * Candidate filter.
    */
   if (
     query.candidateEmail
@@ -425,9 +440,7 @@ async function getJobsPage(
   }
 
   /*
-   * ----------------------------------------------------------
-   * STATUS FILTER
-   * ----------------------------------------------------------
+   * Status filter.
    */
   if (query.status) {
     const status =
@@ -451,9 +464,7 @@ async function getJobsPage(
   }
 
   /*
-   * ----------------------------------------------------------
-   * SOURCE FILTER
-   * ----------------------------------------------------------
+   * Source filter.
    */
   if (query.source) {
     const source =
@@ -477,9 +488,7 @@ async function getJobsPage(
   }
 
   /*
-   * ----------------------------------------------------------
-   * MINIMUM SCORE FILTER
-   * ----------------------------------------------------------
+   * Minimum score filter.
    */
   if (
     query.minScore !==
@@ -512,13 +521,7 @@ async function getJobsPage(
   }
 
   /*
-   * ----------------------------------------------------------
-   * SORT
-   * ----------------------------------------------------------
-   *
-   * Preserve your existing behavior:
-   *
-   * highest matching score first.
+   * Highest score first.
    */
   jobs.sort(
     (a, b) =>
@@ -532,19 +535,6 @@ async function getJobsPage(
       )
   );
 
-  /*
-   * ----------------------------------------------------------
-   * PAGINATION
-   * ----------------------------------------------------------
-   *
-   * Defaults:
-   *
-   * page = 1
-   * pageSize = 10
-   *
-   * "limit" is also accepted temporarily for backward
-   * compatibility with the frontend version we already made.
-   */
   const requestedPage =
     Number(
       query.page
@@ -579,14 +569,6 @@ async function getJobsPage(
         )
       : 10;
 
-  /*
-   * Total is calculated BEFORE slicing.
-   *
-   * This is what allows the frontend to display:
-   *
-   * Page 1 of 4
-   * Showing 1-10 of 37
-   */
   const total =
     jobs.length;
 
@@ -631,16 +613,183 @@ async function getJobsPage(
 
 /*
  * ============================================================
+ * SEARCH RUN PERSISTENCE
+ * ============================================================
+ */
+
+async function persistSearchRun(
+  state
+) {
+  await ensureApplicationSheets();
+
+  const now =
+    new Date()
+      .toISOString();
+
+  const summary =
+    state.summary ||
+    {};
+
+  const row = {
+    runId:
+      state.runId,
+
+    candidateEmail:
+      state.candidateEmail,
+
+    status:
+      state.status,
+
+    startedAt:
+      state.startedAt ||
+      "",
+
+    completedAt:
+      state.completedAt ||
+      "",
+
+    totalJobsFound:
+      summary.totalJobsFound ??
+      summary.totalJobs ??
+      summary.totalFetchedJobs ??
+      "",
+
+    qualifiedJobs:
+      summary.qualifiedJobs ??
+      summary.shortlistedJobs ??
+      summary.savedJobs ??
+      "",
+
+    sourceSummary:
+      JSON.stringify(
+        summary.jobsBySource ||
+        summary.sourceSummary ||
+        {}
+      ),
+
+    error:
+      state.error ||
+      "",
+
+    createdAt:
+      state.createdAt ||
+      state.startedAt ||
+      now,
+
+    updatedAt:
+      now
+  };
+
+  await upsertRows(
+    "Search Runs",
+    [row],
+    ["runId"]
+  );
+
+  return row;
+}
+
+async function getPersistedSearchRun(
+  runId
+) {
+  await ensureApplicationSheets();
+
+  const rows =
+    await readSheet(
+      "Search Runs"
+    );
+
+  const row =
+    rows.find(
+      (item) =>
+        String(
+          item.runId ||
+          ""
+        ) ===
+        String(
+          runId ||
+          ""
+        )
+    );
+
+  if (!row) {
+    return null;
+  }
+
+  let sourceSummary =
+    {};
+
+  try {
+    sourceSummary =
+      row.sourceSummary
+        ? JSON.parse(
+            row.sourceSummary
+          )
+        : {};
+  } catch (_) {
+    sourceSummary =
+      {};
+  }
+
+  return {
+    runId:
+      row.runId,
+
+    candidateEmail:
+      row.candidateEmail,
+
+    status:
+      row.status,
+
+    startedAt:
+      row.startedAt ||
+      null,
+
+    completedAt:
+      row.completedAt ||
+      null,
+
+    summary: {
+      totalJobsFound:
+        row.totalJobsFound ===
+        ""
+          ? undefined
+          : Number(
+              row.totalJobsFound
+            ),
+
+      qualifiedJobs:
+        row.qualifiedJobs ===
+        ""
+          ? undefined
+          : Number(
+              row.qualifiedJobs
+            ),
+
+      sourceSummary
+    },
+
+    error:
+      row.error ||
+      null
+  };
+}
+
+/*
+ * ============================================================
  * START DISCOVERY RUN
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 function startRun(
   candidateEmail
 ) {
   const runId =
     randomUUID();
+
+  const now =
+    new Date()
+      .toISOString();
 
   const state = {
     runId,
@@ -648,26 +797,58 @@ function startRun(
     status:
       "running",
     startedAt:
-      new Date()
-        .toISOString(),
+      now,
     completedAt:
       null,
     summary:
       null,
     error:
-      null
+      null,
+    createdAt:
+      now
   };
 
+  /*
+   * Preserve fast in-memory polling.
+   */
   runs.set(
     runId,
     state
+  );
+
+  /*
+   * Best-effort persistent storage.
+   */
+  persistSearchRun(
+    state
+  ).catch(
+    (error) => {
+      console.error(
+        "[SearchRun] Failed to persist initial run:",
+        error
+      );
+    }
+  );
+
+  /*
+   * Best-effort activity logging.
+   */
+  logSearchStarted(
+    state
+  ).catch(
+    (error) => {
+      console.error(
+        "[ActivityLog] Failed to log search start:",
+        error
+      );
+    }
   );
 
   runDiscoveryForCandidate(
     candidateEmail
   )
     .then(
-      (summary) => {
+      async (summary) => {
         state.status =
           "completed";
 
@@ -677,10 +858,50 @@ function startRun(
 
         state.summary =
           summary;
+
+        state.error =
+          null;
+
+        try {
+          await persistSearchRun(
+            state
+          );
+        } catch (error) {
+          console.error(
+            "[SearchRun] Failed to persist completed run:",
+            error
+          );
+        }
+
+        try {
+          await logSearchCompleted({
+            ...state,
+
+            totalJobsFound:
+              summary?.totalJobsFound ??
+              summary?.totalJobs ??
+              summary?.totalFetchedJobs,
+
+            qualifiedJobs:
+              summary?.qualifiedJobs ??
+              summary?.shortlistedJobs ??
+              summary?.savedJobs,
+
+            sourceSummary:
+              summary?.jobsBySource ??
+              summary?.sourceSummary ??
+              {}
+          });
+        } catch (error) {
+          console.error(
+            "[ActivityLog] Failed to log completed search:",
+            error
+          );
+        }
       }
     )
     .catch(
-      (error) => {
+      async (error) => {
         state.status =
           "failed";
 
@@ -689,7 +910,31 @@ function startRun(
             .toISOString();
 
         state.error =
-          error.message;
+          error?.message ||
+          String(error);
+
+        try {
+          await persistSearchRun(
+            state
+          );
+        } catch (persistError) {
+          console.error(
+            "[SearchRun] Failed to persist failed run:",
+            persistError
+          );
+        }
+
+        try {
+          await logSearchFailed(
+            state,
+            state.error
+          );
+        } catch (logError) {
+          console.error(
+            "[ActivityLog] Failed to log failed search:",
+            logError
+          );
+        }
       }
     );
 
@@ -700,9 +945,8 @@ function startRun(
  * ============================================================
  * RUN DISCOVERY
  * ============================================================
- *
- * EXISTING — UNCHANGED.
  */
+
 async function runDiscoveryForCandidate(
   email
 ) {
@@ -727,6 +971,7 @@ async function runDiscoveryForCandidate(
  * REGISTER API ROUTES
  * ============================================================
  */
+
 function registerApiRoutes(
   app,
   {
@@ -810,19 +1055,8 @@ function registerApiRoutes(
    * ==========================================================
    * JOBS
    * ==========================================================
-   *
-   * UPDATED.
-   *
-   * candidateEmail is no longer required.
-   *
-   * This enables:
-   *
-   * GET /api/jobs
-   *
-   * to mean all candidates.
-   *
-   * Pagination is also returned.
    */
+
   app.get(
     "/api/jobs",
     async (
@@ -836,24 +1070,14 @@ function registerApiRoutes(
           );
 
         res.json({
-          /*
-           * Jobs on the current page.
-           */
           data:
             result.data,
 
-          /*
-           * Number returned on THIS page.
-           */
           count:
             result
               .data
               .length,
 
-          /*
-           * Total number of jobs matching all filters BEFORE
-           * pagination.
-           */
           total:
             result
               .pagination
@@ -887,9 +1111,8 @@ function registerApiRoutes(
    * ==========================================================
    * GET ONE JOB
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
   app.get(
     "/api/jobs/:jobId",
     async (
@@ -941,34 +1164,296 @@ function registerApiRoutes(
   );
 
   /*
+   * ============================================================
+   * APPLICATION EXECUTION READINESS
+   * ============================================================
+   *
+   * GET /api/applications/:applicationId/execution-readiness
+   *
+   * Read-only.
+   *
+   * Does NOT:
+   *
+   * - create an Application Attempt
+   * - start browser execution
+   * - change application status
+   * - submit an application
+   *
+   * It only asks executionGuard.js whether a NEW execution may
+   * safely begin.
+   */
+
+  app.get(
+    "/api/applications/:applicationId/execution-readiness",
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const applicationId =
+          String(
+            req.params
+              .applicationId ||
+            ""
+          ).trim();
+
+        if (
+          !applicationId
+        ) {
+          return res
+            .status(400)
+            .json({
+              error:
+                "applicationId is required",
+
+              code:
+                "APPLICATION_ID_REQUIRED"
+            });
+        }
+
+        /*
+         * candidateEmail is optional here.
+         *
+         * If supplied, executionGuard verifies ownership.
+         *
+         * This is useful for the frontend candidate workspace,
+         * but it is not being treated as authentication.
+         */
+
+        const candidateEmail =
+          String(
+            req.query
+              .candidateEmail ||
+            ""
+          ).trim();
+
+        const readiness =
+          await getExecutionReadiness(
+            applicationId,
+            candidateEmail
+              ? {
+                  candidateEmail
+                }
+              : {}
+          );
+
+        return res.json({
+          data:
+            readiness,
+
+          fetchedAt:
+            new Date()
+              .toISOString()
+        });
+      } catch (err) {
+        /*
+         * Preserve domain HTTP status codes when executionGuard
+         * provides one.
+         */
+
+        const statusCode =
+          Number.isInteger(
+            err?.statusCode
+          )
+            ? err.statusCode
+            : 500;
+
+        if (
+          statusCode >=
+            500
+        ) {
+          console.error(
+            "[ExecutionReadiness]",
+            err
+          );
+        }
+
+        return res
+          .status(
+            statusCode
+          )
+          .json({
+            error:
+              err?.message ||
+              "Failed to determine execution readiness",
+
+            code:
+              err?.code ||
+              "EXECUTION_READINESS_ERROR"
+          });
+      }
+    }
+  );
+
+/*
+ * ==========================================================
+ * APPLICATION EXECUTION PREVIEW
+ * ==========================================================
+ *
+ * This does NOT create an attempt.
+ *
+ * It allows the frontend to inspect:
+ *
+ * - detected application method
+ * - application URL
+ * - email recipient
+ * - routing confidence
+ * - whether human review is required
+ * - prepared email draft when applicable
+ */
+
+app.get(
+  "/api/applications/:applicationId/execution-preview",
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const data =
+        await previewApplicationExecution(
+          req.params
+            .applicationId
+        );
+
+      res.json({
+        data
+      });
+    } catch (err) {
+      const message =
+        err?.message ||
+        String(err);
+
+      const lowerMessage =
+        message.toLowerCase();
+
+      const statusCode =
+        lowerMessage.includes(
+          "not found"
+        )
+          ? 404
+          : lowerMessage.includes(
+              "must be approved"
+            )
+            ? 409
+            : lowerMessage.includes(
+                "already been submitted"
+              )
+              ? 409
+              : 400;
+
+      res
+        .status(
+          statusCode
+        )
+        .json({
+          error:
+            message
+        });
+    }
+  }
+);
+
+/*
+ * ==========================================================
+ * START APPLICATION EXECUTION
+ * ==========================================================
+ *
+ * This:
+ *
+ * - validates the application
+ * - detects the route
+ * - creates an Application Attempt
+ * - moves it to applying
+ * - hands it to the correct channel
+ *
+ * For now:
+ *
+ * email
+ *   → prepares email and pauses for review
+ *
+ * google_form
+ * ats_form
+ * company_form
+ * linkedin_easy_apply
+ * manual_only
+ * unknown
+ *   → pause for human review
+ */
+
+app.post(
+  "/api/applications/:applicationId/execute",
+  checkTriggerToken,
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const data =
+        await startApplicationExecution({
+          applicationId:
+            req.params
+              .applicationId,
+
+          applicationMode:
+            req.body
+              ?.applicationMode
+        });
+
+      res
+        .status(202)
+        .json({
+          data
+        });
+    } catch (err) {
+      console.error(
+        "Application execution error:",
+        err
+      );
+
+      const message =
+        err?.message ||
+        String(err);
+
+      const lowerMessage =
+        message.toLowerCase();
+
+      const statusCode =
+        lowerMessage.includes(
+          "not found"
+        )
+          ? 404
+          : lowerMessage.includes(
+              "must be approved"
+            )
+            ? 409
+            : lowerMessage.includes(
+                "already been submitted"
+              )
+              ? 409
+              : lowerMessage.includes(
+                  "unsupported application mode"
+                )
+                ? 400
+                : 400;
+
+      res
+        .status(
+          statusCode
+        )
+        .json({
+          error:
+            message
+        });
+    }
+  }
+);  
+
+  /*
    * ==========================================================
    * UPDATE JOB / PROSPECT STATUS
    * ==========================================================
-   *
-   * NEW.
-   *
-   * Used later by:
-   *
-   * Queue
-   * Skip
-   * Applied
-   *
-   * Example:
-   *
-   * PATCH /api/jobs/3430c3a6/status
-   *
-   * {
-   *   "candidateEmail": "...",
-   *   "status": "Queued"
-   * }
-   *
-   * IMPORTANT:
-   *
-   * This persists directly into Shortlisted Jobs so Review
-   * Queue can later retrieve:
-   *
-   * GET /api/jobs?status=Queued
    */
+
   app.patch(
     "/api/jobs/:jobId/status",
     checkTriggerToken,
@@ -997,12 +1482,6 @@ function registerApiRoutes(
               ?.status ||
             ""
           ).trim();
-
-        /*
-         * -----------------------------
-         * VALIDATION
-         * -----------------------------
-         */
 
         if (!jobId) {
           return res
@@ -1039,14 +1518,6 @@ function registerApiRoutes(
             });
         }
 
-        /*
-         * -----------------------------
-         * FIND EXACT CANDIDATE/JOB ROW
-         * -----------------------------
-         *
-         * jobId alone is not enough because the same job may
-         * theoretically belong to more than one candidate.
-         */
         const rows =
           await readSheet(
             "Shortlisted Jobs"
@@ -1080,24 +1551,6 @@ function registerApiRoutes(
             });
         }
 
-        /*
-         * -----------------------------
-         * PRESERVE THE FULL EXISTING ROW
-         * -----------------------------
-         *
-         * This is important.
-         *
-         * We do NOT write only:
-         *
-         * {
-         *   jobId,
-         *   status
-         * }
-         *
-         * because that could blank unrelated Sheets columns.
-         *
-         * We preserve everything and update status only.
-         */
         const updatedJob = {
           ...existingJob,
 
@@ -1114,6 +1567,39 @@ function registerApiRoutes(
             "candidateEmail"
           ]
         );
+
+        /*
+         * Best-effort Activity Log.
+         */
+        try {
+          if (
+            status ===
+            "Queued"
+          ) {
+            await logJobQueued(
+              updatedJob
+            );
+          }
+
+          if (
+            status ===
+            "New" &&
+            String(
+              existingJob.status ||
+              ""
+            ) ===
+            "Queued"
+          ) {
+            await logJobUnqueued(
+              updatedJob
+            );
+          }
+        } catch (logError) {
+          console.error(
+            "[ActivityLog] Job status log failed:",
+            logError
+          );
+        }
 
         res.json({
           data:
@@ -1141,15 +1627,8 @@ function registerApiRoutes(
    * ==========================================================
    * DASHBOARD
    * ==========================================================
-   *
-   * EXISTING FLOW — UNCHANGED.
-   *
-   * Notice:
-   *
-   * This still calls the original getJobs(), NOT getJobsPage().
-   *
-   * So your existing dashboard behavior is preserved.
    */
+
   app.get(
     "/api/dashboard/:email",
     async (
@@ -1300,9 +1779,8 @@ function registerApiRoutes(
    * ==========================================================
    * EXECUTIONS
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
   app.get(
     "/api/executions/:email",
     async (
@@ -1359,9 +1837,8 @@ function registerApiRoutes(
    * ==========================================================
    * START SEARCH
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
   app.post(
     "/api/search/:email",
     checkTriggerToken,
@@ -1408,34 +1885,63 @@ function registerApiRoutes(
    * ==========================================================
    * SEARCH RUN STATUS
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
   app.get(
     "/api/runs/:runId",
-    (
+    async (
       req,
       res
     ) => {
-      const run =
-        runs.get(
+      try {
+        const runId =
           req.params
-            .runId
+            .runId;
+
+        /*
+         * Fast in-memory lookup.
+         */
+        let run =
+          runs.get(
+            runId
+          );
+
+        /*
+         * Persistent fallback.
+         */
+        if (!run) {
+          run =
+            await getPersistedSearchRun(
+              runId
+            );
+        }
+
+        if (!run) {
+          return res
+            .status(404)
+            .json({
+              error:
+                "Run not found"
+            });
+        }
+
+        res.json({
+          data:
+            run
+        });
+      } catch (err) {
+        console.error(
+          "Search run lookup error:",
+          err
         );
 
-      if (!run) {
-        return res
-          .status(404)
+        res
+          .status(500)
           .json({
             error:
-              "Run not found"
+              "Failed to load search run"
           });
       }
-
-      res.json({
-        data:
-          run
-      });
     }
   );
 
@@ -1443,9 +1949,8 @@ function registerApiRoutes(
    * ==========================================================
    * SYNC INTAKE
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
   app.post(
     "/api/sync-intake",
     checkTriggerToken,
@@ -1473,12 +1978,8 @@ function registerApiRoutes(
    * ==========================================================
    * APPLICATION GENERATION
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
-   *
-   * Application generation remains completely separate from
-   * discovery/queueing.
    */
+
   app.post(
     "/api/applications/:candidateEmail/:jobId/generate",
     checkTriggerToken,
@@ -1487,6 +1988,61 @@ function registerApiRoutes(
       res
     ) => {
       try {
+        /*
+         * Check if a reusable application already existed
+         * before generation so the Activity Log is not duplicated.
+         */
+        const beforeRows =
+          await readSheet(
+            "Generated Applications"
+          );
+
+        const candidateEmail =
+          String(
+            req.params
+              .candidateEmail ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        const jobId =
+          String(
+            req.params
+              .jobId ||
+            ""
+          ).trim();
+
+        const existedBefore =
+          beforeRows.some(
+            (row) =>
+              String(
+                row.jobId ||
+                ""
+              ).trim() ===
+                jobId &&
+              String(
+                row.candidateEmail ||
+                ""
+              )
+                .trim()
+                .toLowerCase() ===
+                candidateEmail &&
+              [
+                "generated",
+                "under review",
+                "approved",
+                "applied"
+              ].includes(
+                String(
+                  row.status ||
+                  ""
+                )
+                  .trim()
+                  .toLowerCase()
+              )
+          );
+
         const data =
           await generateApplicationForJob({
             candidateEmail:
@@ -1502,6 +2058,23 @@ function registerApiRoutes(
                 ?.applicationType ||
               null
           });
+
+        if (
+          !existedBefore &&
+          data?.status ===
+            "Generated"
+        ) {
+          try {
+            await logApplicationGenerated(
+              data
+            );
+          } catch (logError) {
+            console.error(
+              "[ActivityLog] Failed to log generated application:",
+              logError
+            );
+          }
+        }
 
         res
           .status(201)
@@ -1531,9 +2104,102 @@ function registerApiRoutes(
    * ==========================================================
    * LIST APPLICATIONS
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
+    /*
+ * ============================================================
+ * APPLICATION QUERY ROUTES
+ * ============================================================
+ *
+ * Read-only application lifecycle queries.
+ *
+ * Final endpoints:
+ *
+ * GET /api/applications/workspace
+ * GET /api/applications/ready-for-review
+ * GET /api/applications/counts
+ *
+ * All filtering and eligibility logic remains inside
+ * applicationQueryService.js.
+ */
+
+app.use(
+  "/api/applications",
+  createApplicationQueryRouter()
+);
+
+  /*
+   * ==========================================================
+   * APPLICATION REVIEW ROUTES
+   * ==========================================================
+   *
+   * Dedicated review lifecycle routes:
+   *
+   * GET  /api/applications/:applicationId/review
+   * POST /api/applications/:applicationId/review
+   * POST /api/applications/:applicationId/approve
+   * POST /api/applications/:applicationId/reject
+   *
+   * Business logic remains inside applicationReviewService.js.
+   * api.js only mounts the router.
+   */
+
+  app.use(
+    "/api/applications",
+    createApplicationReviewRouter({
+      checkTriggerToken
+    })
+  );
+
+  /*
+ * ============================================================
+ * APPLICATION QUESTION ROUTES
+ * ============================================================
+ *
+ * Phase 3:
+ *
+ * - resolve inspected questions
+ * - return unresolved questions
+ * - store candidate answers
+ * - confirm reusable answers
+ * - retrieve stored answers
+ *
+ * Business logic remains inside:
+ *
+ * applicationQuestionService.js
+ *
+ * api.js only mounts the router.
+ */
+
+app.use(
+  "/api/applications",
+  createApplicationQuestionRouter({
+    checkTriggerToken
+  })
+);
+
+/*
+ * ============================================================
+ * APPLICATION EXECUTION RESUME ROUTES
+ * ============================================================
+ *
+ * POST
+ *
+ * /api/applications/:applicationId/attempts/:attemptId/resume
+ *
+ * Resume works on an EXISTING active attempt.
+ *
+ * It must never create a second Application Attempt.
+ */
+
+app.use(
+  "/api/applications",
+
+  createApplicationResumeRouter({
+    checkTriggerToken
+  })
+);
+
   app.get(
     "/api/applications",
     async (
@@ -1588,9 +2254,8 @@ function registerApiRoutes(
    * ==========================================================
    * GET APPLICATION
    * ==========================================================
-   *
-   * EXISTING — UNCHANGED.
    */
+
   app.get(
     "/api/applications/:applicationId",
     async (
@@ -1632,92 +2297,351 @@ function registerApiRoutes(
 
   /*
    * ==========================================================
-   * APPLICATION STATUS
+   * CREATE APPLICATION ATTEMPT
    * ==========================================================
-   *
-   * EXISTING BEHAVIOR — UNCHANGED.
-   *
-   * The only tiny implementation change is that upsertRows is
-   * already imported at the top of the file instead of being
-   * required again inside this function.
    */
-  app.patch(
-    "/api/applications/:applicationId/status",
+
+  app.post(
+    "/api/applications/:applicationId/attempts",
     checkTriggerToken,
     async (
       req,
       res
     ) => {
       try {
-        const status =
-          String(
-            req.body
-              ?.status ||
-            ""
-          ).trim();
+        const data =
+          await createApplicationAttempt({
+            applicationId:
+              req.params
+                .applicationId,
 
-        if (
-          !APPLICATION_STATUSES.has(
-            status
+            applicationMethod:
+              req.body
+                ?.applicationMethod,
+
+            applicationMode:
+              req.body
+                ?.applicationMode
+          });
+
+        res
+          .status(201)
+          .json({
+            data
+          });
+      } catch (err) {
+        const message =
+          err?.message ||
+          String(err);
+
+        const statusCode =
+          message
+            .toLowerCase()
+            .includes(
+              "not found"
+            )
+            ? 404
+            : message
+                .includes(
+                  "must be Approved"
+                )
+              ? 409
+              : 400;
+
+        res
+          .status(
+            statusCode
           )
-        ) {
-          return res
-            .status(400)
-            .json({
-              error:
-                `Invalid status. Allowed: ${[
-                  ...APPLICATION_STATUSES
-                ].join(", ")}`
-            });
-        }
+          .json({
+            error:
+              message
+          });
+      }
+    }
+  );
 
-        const current =
-          await getGeneratedApplication(
-            req.params
-              .applicationId
+  /*
+   * ==========================================================
+   * LIST APPLICATION ATTEMPTS
+   * ==========================================================
+   */
+
+  app.get(
+    "/api/application-attempts",
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await listApplicationAttempts(
+            req.query
           );
 
-        if (!current) {
+        res.json({
+          data,
+
+          count:
+            data.length
+        });
+      } catch (err) {
+        console.error(
+          "Application attempts list error:",
+          err
+        );
+
+        res
+          .status(500)
+          .json({
+            error:
+              "Failed to load application attempts"
+          });
+      }
+    }
+  );
+
+  /*
+   * ==========================================================
+   * GET APPLICATION ATTEMPT
+   * ==========================================================
+   */
+
+  app.get(
+    "/api/application-attempts/:attemptId",
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await getApplicationAttempt(
+            req.params
+              .attemptId
+          );
+
+        if (!data) {
           return res
             .status(404)
             .json({
               error:
-                "Application not found"
+                "Application attempt not found"
             });
         }
 
-        const updated = {
-          ...current,
-
-          status,
-
-          updatedAt:
-            new Date()
-              .toISOString()
-        };
-
-        await upsertRows(
-          "Generated Applications",
-          [
-            updated
-          ],
-          [
-            "applicationId"
-          ]
-        );
-
         res.json({
-          data:
-            sanitizeApplication(
-              updated
-            )
+          data
         });
       } catch (err) {
         res
           .status(500)
           .json({
             error:
-              "Failed to update application status"
+              "Failed to load application attempt"
+          });
+      }
+    }
+  );
+
+  /*
+   * ==========================================================
+   * START APPLICATION ATTEMPT
+   * ==========================================================
+   */
+
+  app.patch(
+    "/api/application-attempts/:attemptId/start",
+    checkTriggerToken,
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await startApplicationAttempt(
+            req.params
+              .attemptId
+          );
+
+        res.json({
+          data
+        });
+      } catch (err) {
+        res
+          .status(400)
+          .json({
+            error:
+              err?.message ||
+              String(err)
+          });
+      }
+    }
+  );
+
+  /*
+   * ==========================================================
+   * APPLICATION ATTEMPT NEEDS REVIEW
+   * ==========================================================
+   */
+
+  app.patch(
+    "/api/application-attempts/:attemptId/needs-review",
+    checkTriggerToken,
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await markAttemptNeedsReview(
+            req.params
+              .attemptId,
+
+            req.body
+              ?.reason ||
+            ""
+          );
+
+        res.json({
+          data
+        });
+      } catch (err) {
+        res
+          .status(400)
+          .json({
+            error:
+              err?.message ||
+              String(err)
+          });
+      }
+    }
+  );
+
+  /*
+   * ==========================================================
+   * FAIL APPLICATION ATTEMPT
+   * ==========================================================
+   */
+
+  app.patch(
+    "/api/application-attempts/:attemptId/fail",
+    checkTriggerToken,
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await failApplicationAttempt(
+            req.params
+              .attemptId,
+
+            req.body
+              ?.reason
+          );
+
+        res.json({
+          data
+        });
+      } catch (err) {
+        res
+          .status(400)
+          .json({
+            error:
+              err?.message ||
+              String(err)
+          });
+      }
+    }
+  );
+
+  /*
+   * ==========================================================
+   * SUBMIT APPLICATION ATTEMPT
+   * ==========================================================
+   */
+
+  app.patch(
+    "/api/application-attempts/:attemptId/submit",
+    checkTriggerToken,
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await submitApplicationAttempt(
+            req.params
+              .attemptId,
+            {
+              confirmationReference:
+                req.body
+                  ?.confirmationReference,
+
+              confirmationUrl:
+                req.body
+                  ?.confirmationUrl
+            }
+          );
+
+        res.json({
+          data
+        });
+      } catch (err) {
+        console.error(
+          "Submit application attempt error:",
+          err
+        );
+
+        res
+          .status(400)
+          .json({
+            error:
+              err?.message ||
+              String(err)
+          });
+      }
+    }
+  );
+
+  /*
+   * ==========================================================
+   * ACTIVITY LOG
+   * ==========================================================
+   */
+
+  app.get(
+    "/api/activity",
+    async (
+      req,
+      res
+    ) => {
+      try {
+        const data =
+          await listActivity(
+            req.query
+          );
+
+        res.json({
+          data,
+
+          count:
+            data.length,
+
+          fetchedAt:
+            new Date()
+              .toISOString()
+        });
+      } catch (err) {
+        console.error(
+          "Activity API error:",
+          err
+        );
+
+        res
+          .status(500)
+          .json({
+            error:
+              "Failed to load activity"
           });
       }
     }
