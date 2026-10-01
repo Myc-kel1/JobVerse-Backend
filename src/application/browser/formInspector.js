@@ -91,7 +91,6 @@ const DEFAULT_INSPECTION_OPTIONS =
       true,
   });
 
-
 /*
  * ============================================================
  * PAGE-LEVEL CAPTCHA DETECTION
@@ -117,6 +116,7 @@ async function detectCaptcha(
         '[id*="captcha" i]',
       ];
 
+
       for (
         const selector of
         selectors
@@ -130,6 +130,7 @@ async function detectCaptcha(
         }
       }
 
+
       const bodyText =
         (
           document.body
@@ -137,6 +138,7 @@ async function detectCaptcha(
           ""
         )
           .toLowerCase();
+
 
       return (
         bodyText.includes(
@@ -180,17 +182,21 @@ async function detectLoginRequirement(
             .trim()
             .toLowerCase();
 
+
       /*
        * Password field is a strong signal that the current page
        * expects authentication.
        *
        * IMPORTANT:
+       *
        * We detect it but never read its value.
        */
+
       const passwordField =
         document.querySelector(
           'input[type="password"]'
         );
+
 
       if (
         passwordField
@@ -198,24 +204,35 @@ async function detectLoginRequirement(
         return true;
       }
 
+
       const body =
         lower(
           document.body
             ?.innerText
         );
 
+
       const loginSignals = [
         "sign in to continue",
+
         "log in to continue",
+
         "login to continue",
+
         "please sign in",
+
         "please log in",
+
         "create an account to continue",
+
         "account required",
       ];
 
+
       return loginSignals.some(
-        (signal) =>
+        (
+          signal
+        ) =>
           body.includes(
             signal
           )
@@ -271,9 +288,12 @@ async function getPageDescription(
           ),
       ];
 
+
       return (
         candidates.find(
-          (value) =>
+          (
+            value
+          ) =>
             typeof value ===
               "string" &&
             value.trim()
@@ -306,19 +326,24 @@ async function detectMultiStepForm(
             .trim()
             .toLowerCase();
 
+
       const elements =
         Array.from(
           document.querySelectorAll(
             [
               "button",
+
               'input[type="button"]',
+
               'input[type="submit"]',
+
               '[role="button"]',
             ].join(
               ","
             )
           )
         );
+
 
       const labels =
         elements.map(
@@ -334,8 +359,11 @@ async function detectMultiStepForm(
             )
         );
 
+
       return labels.some(
-        (label) =>
+        (
+          label
+        ) =>
           label ===
             "next" ||
           label ===
@@ -372,6 +400,7 @@ async function detectActionType(
       .LOGIN;
   }
 
+
   return page.evaluate(
     (
       actionTypes
@@ -386,19 +415,24 @@ async function detectActionType(
             .trim()
             .toLowerCase();
 
+
       const elements =
         Array.from(
           document.querySelectorAll(
             [
               "button",
+
               'input[type="submit"]',
+
               'input[type="button"]',
+
               '[role="button"]',
             ].join(
               ","
             )
           )
         );
+
 
       const labels =
         elements.map(
@@ -414,9 +448,12 @@ async function detectActionType(
             )
         );
 
+
       if (
         labels.some(
-          (label) =>
+          (
+            label
+          ) =>
             label ===
               "next" ||
             label ===
@@ -426,9 +463,12 @@ async function detectActionType(
         return actionTypes.NEXT;
       }
 
+
       if (
         labels.some(
-          (label) =>
+          (
+            label
+          ) =>
             label.includes(
               "review"
             )
@@ -437,9 +477,12 @@ async function detectActionType(
         return actionTypes.REVIEW;
       }
 
+
       if (
         labels.some(
-          (label) =>
+          (
+            label
+          ) =>
             label ===
               "submit" ||
             label.includes(
@@ -453,8 +496,10 @@ async function detectActionType(
         return actionTypes.SUBMIT;
       }
 
+
       return actionTypes.UNKNOWN;
     },
+
     FORM_ACTION_TYPES
   );
 }
@@ -515,10 +560,12 @@ async function extractRenderedFields(
           return false;
         }
 
+
         const style =
           window.getComputedStyle(
             element
           );
+
 
         if (
           style.display ===
@@ -529,14 +576,17 @@ async function extractRenderedFields(
           return false;
         }
 
+
         const rect =
           element
             .getBoundingClientRect();
+
 
         /*
          * Some custom controls can have zero dimensions on the
          * input itself while their parent remains visible.
          */
+
         if (
           rect.width ===
             0 &&
@@ -546,15 +596,18 @@ async function extractRenderedFields(
           const parent =
             element.parentElement;
 
+
           if (
             !parent
           ) {
             return false;
           }
 
+
           const parentRect =
             parent
               .getBoundingClientRect();
+
 
           if (
             parentRect.width ===
@@ -566,7 +619,281 @@ async function extractRenderedFields(
           }
         }
 
+
         return true;
+      }
+
+
+      /*
+       * --------------------------------------------------------
+       * NON-APPLICATION PAGE UI CHECK
+       * --------------------------------------------------------
+       *
+       * Some job/listing pages contain interactive controls that
+       * are unrelated to the employer application itself.
+       *
+       * Common examples:
+       *
+       * - cookie preference panels
+       * - privacy preference dialogs
+       * - consent-management widgets
+       *
+       * These controls often use normal inputs, checkboxes, radio
+       * buttons, and ARIA groups, so without an exclusion guard
+       * they can look like legitimate application questions.
+       *
+       * IMPORTANT:
+       *
+       * This function only excludes non-application UI from form
+       * inspection.
+       *
+       * It does NOT:
+       *
+       * - click cookie buttons
+       * - accept consent
+       * - reject consent
+       * - dismiss overlays
+       * - modify the current page
+       * - alter application navigation
+       *
+       * The existing application field flow continues unchanged
+       * for controls that do not match these exclusions.
+       */
+
+      function isExcludedPageUiElement(
+        element
+      ) {
+        if (
+          !element ||
+          typeof element.closest !==
+            "function"
+        ) {
+          return false;
+        }
+
+
+        /*
+         * ------------------------------------------------------
+         * STRUCTURAL CONSENT CONTAINERS
+         * ------------------------------------------------------
+         *
+         * Prefer structural signals before textual signals.
+         *
+         * This prevents us from excluding a legitimate employer
+         * field merely because its label happens to contain a word
+         * such as "privacy".
+         */
+
+        const excludedContainerSelector =
+          [
+            /*
+             * Generic cookie / consent / privacy containers.
+             */
+
+            '[id*="cookie" i]',
+
+            '[class*="cookie" i]',
+
+            '[id*="consent" i]',
+
+            '[class*="consent" i]',
+
+            '[id*="privacy" i]',
+
+            '[class*="privacy" i]',
+
+            '[id*="cmp" i]',
+
+            '[class*="cmp" i]',
+
+            '[aria-label*="cookie" i]',
+
+            '[aria-label*="consent" i]',
+
+            '[aria-label*="privacy" i]',
+
+            '[data-testid*="cookie" i]',
+
+            '[data-testid*="consent" i]',
+
+            '[data-testid*="privacy" i]',
+
+
+            /*
+             * OneTrust.
+             */
+
+            "#onetrust-consent-sdk",
+
+            "#onetrust-banner-sdk",
+
+            "#onetrust-pc-sdk",
+
+            ".ot-sdk-container",
+
+
+            /*
+             * Cookiebot.
+             */
+
+            "#CybotCookiebotDialog",
+
+            "#CybotCookiebotDialogBody",
+
+            '[id^="CybotCookiebot"]',
+
+
+            /*
+             * Didomi.
+             */
+
+            "#didomi-host",
+
+            ".didomi-popup-container",
+
+            ".didomi-consent-popup",
+
+
+            /*
+             * Quantcast CMP.
+             */
+
+            "#qc-cmp2-container",
+
+            ".qc-cmp2-container",
+
+
+            /*
+             * TrustArc.
+             */
+
+            "#truste-consent-track",
+
+            ".truste_overlay",
+
+            ".trustarc-banner-container",
+          ].join(
+            ","
+          );
+
+
+        if (
+          element.closest(
+            excludedContainerSelector
+          )
+        ) {
+          return true;
+        }
+
+
+        /*
+         * ------------------------------------------------------
+         * SEMANTIC PANEL FALLBACK
+         * ------------------------------------------------------
+         *
+         * Some consent-management platforms use generated IDs and
+         * class names, so structural selectors may not identify
+         * them.
+         *
+         * In that case we only inspect a nearby semantic panel:
+         *
+         * - dialog
+         * - role=dialog
+         * - aside
+         * - role=region
+         *
+         * We intentionally do not inspect arbitrary parent <div>
+         * elements. A large page-level wrapper could contain both
+         * the genuine job application and unrelated privacy text.
+         */
+
+        const nearbyPanel =
+          element.closest(
+            [
+              "dialog",
+
+              '[role="dialog"]',
+
+              "aside",
+
+              '[role="region"]',
+            ].join(
+              ","
+            )
+          );
+
+
+        if (
+          !nearbyPanel
+        ) {
+          return false;
+        }
+
+
+        const nearbyText =
+          clean(
+            nearbyPanel.innerText
+          )
+            .toLowerCase();
+
+
+        if (
+          !nearbyText
+        ) {
+          return false;
+        }
+
+
+        /*
+         * Strong consent-management phrases.
+         *
+         * These include the categories observed during the real
+         * JobVerse E2E application test without hard-coding those
+         * labels as field-level exclusions.
+         */
+
+        const consentContextSignals =
+          [
+            "cookie preferences",
+
+            "cookie preference",
+
+            "cookie settings",
+
+            "manage cookies",
+
+            "manage consent",
+
+            "consent preferences",
+
+            "privacy preferences",
+
+            "privacy settings",
+
+            "accept all cookies",
+
+            "reject all cookies",
+
+            "necessary cookies",
+
+            "strictly necessary",
+
+            "performance cookies",
+
+            "targeting cookies",
+
+            "functional cookies",
+          ];
+
+
+        return consentContextSignals.some(
+          (
+            signal
+          ) =>
+            nearbyText.includes(
+              signal
+            )
+        );
       }
 
 
@@ -594,6 +921,7 @@ async function extractRenderedFields(
             element.id
           );
 
+
         if (
           id
         ) {
@@ -601,6 +929,7 @@ async function extractRenderedFields(
            * CSS.escape protects IDs containing special
            * characters.
            */
+
           const explicit =
             document.querySelector(
               `label[for="${CSS.escape(
@@ -608,11 +937,13 @@ async function extractRenderedFields(
               )}"]`
             );
 
+
           const explicitText =
             clean(
               explicit
                 ?.innerText
             );
+
 
           if (
             explicitText
@@ -625,12 +956,14 @@ async function extractRenderedFields(
         /*
          * aria-labelledby may reference multiple nodes.
          */
+
         const labelledBy =
           clean(
             element.getAttribute(
               "aria-labelledby"
             )
           );
+
 
         if (
           labelledBy
@@ -659,6 +992,7 @@ async function extractRenderedFields(
                 " "
               );
 
+
           if (
             text
           ) {
@@ -673,6 +1007,7 @@ async function extractRenderedFields(
               "aria-label"
             )
           );
+
 
         if (
           ariaLabel
@@ -689,16 +1024,19 @@ async function extractRenderedFields(
          *   <input />
          * </label>
          */
+
         const wrappingLabel =
           element.closest(
             "label"
           );
+
 
         const wrappingText =
           clean(
             wrappingLabel
               ?.innerText
           );
+
 
         if (
           wrappingText
@@ -710,10 +1048,12 @@ async function extractRenderedFields(
         /*
          * fieldset + legend is common for groups.
          */
+
         const fieldset =
           element.closest(
             "fieldset"
           );
+
 
         if (
           fieldset
@@ -723,11 +1063,13 @@ async function extractRenderedFields(
               "legend"
             );
 
+
           const legendText =
             clean(
               legend
                 ?.innerText
             );
+
 
           if (
             legendText
@@ -741,20 +1083,28 @@ async function extractRenderedFields(
          * Generic form/question containers used by many ATS
          * implementations.
          */
+
         const container =
           element.closest(
             [
               '[role="group"]',
+
               '[role="radiogroup"]',
+
               ".form-field",
+
               ".field",
+
               ".question",
+
               ".application-question",
+
               '[data-field]',
             ].join(
               ","
             )
           );
+
 
         if (
           container
@@ -763,20 +1113,26 @@ async function extractRenderedFields(
             container.querySelector(
               [
                 "label",
+
                 "legend",
+
                 '[role="heading"]',
+
                 ".label",
+
                 ".question-label",
               ].join(
                 ","
               )
             );
 
+
           const containerText =
             clean(
               possibleLabel
                 ?.innerText
             );
+
 
           if (
             containerText
@@ -792,6 +1148,7 @@ async function extractRenderedFields(
               "placeholder"
             )
           );
+
 
         if (
           placeholder
@@ -820,6 +1177,7 @@ async function extractRenderedFields(
           return true;
         }
 
+
         if (
           clean(
             element.getAttribute(
@@ -831,19 +1189,26 @@ async function extractRenderedFields(
           return true;
         }
 
+
         const container =
           element.closest(
             [
               "fieldset",
+
               '[role="group"]',
+
               '[role="radiogroup"]',
+
               ".form-field",
+
               ".question",
+
               ".application-question",
             ].join(
               ","
             )
           );
+
 
         if (
           !container
@@ -851,28 +1216,36 @@ async function extractRenderedFields(
           return false;
         }
 
+
         /*
          * Avoid treating every asterisk anywhere on the page as
          * required. Only inspect likely label nodes.
          */
+
         const labelNode =
           container.querySelector(
             [
               "label",
+
               "legend",
+
               '[role="heading"]',
+
               ".label",
+
               ".question-label",
             ].join(
               ","
             )
           );
 
+
         const text =
           clean(
             labelNode
               ?.innerText
           );
+
 
         return text.endsWith(
           "*"
@@ -893,6 +1266,7 @@ async function extractRenderedFields(
           element.tagName
             .toLowerCase();
 
+
         const role =
           clean(
             element.getAttribute(
@@ -901,12 +1275,14 @@ async function extractRenderedFields(
           )
             .toLowerCase();
 
+
         if (
           tag ===
           "textarea"
         ) {
           return "textarea";
         }
+
 
         if (
           tag ===
@@ -917,12 +1293,14 @@ async function extractRenderedFields(
             : "choice";
         }
 
+
         if (
           role ===
           "combobox"
         ) {
           return "choice";
         }
+
 
         if (
           role ===
@@ -931,6 +1309,7 @@ async function extractRenderedFields(
           return "choice";
         }
 
+
         if (
           role ===
           "checkbox"
@@ -938,11 +1317,13 @@ async function extractRenderedFields(
           return "boolean";
         }
 
+
         if (
           element.isContentEditable
         ) {
           return "textarea";
         }
+
 
         if (
           tag !==
@@ -950,6 +1331,7 @@ async function extractRenderedFields(
         ) {
           return "unknown";
         }
+
 
         const type =
           clean(
@@ -959,6 +1341,7 @@ async function extractRenderedFields(
             "text"
           )
             .toLowerCase();
+
 
         switch (
           type
@@ -973,6 +1356,7 @@ async function extractRenderedFields(
             return "number";
 
           case "date":
+
           case "datetime-local":
             return "date";
 
@@ -1007,9 +1391,11 @@ async function extractRenderedFields(
           element.tagName
             .toLowerCase();
 
+
         /*
          * Native select.
          */
+
         if (
           tag ===
           "select"
@@ -1035,12 +1421,14 @@ async function extractRenderedFields(
         /*
          * Radio group / checkbox group.
          */
+
         const name =
           clean(
             element.getAttribute(
               "name"
             )
           );
+
 
         const type =
           clean(
@@ -1049,6 +1437,7 @@ async function extractRenderedFields(
             )
           )
             .toLowerCase();
+
 
         if (
           name &&
@@ -1064,13 +1453,26 @@ async function extractRenderedFields(
               name
             )}"]`;
 
+
           return Array.from(
             document.querySelectorAll(
               selector
             )
           )
+            /*
+             * Keep the original visibility requirement and add
+             * only the non-application-UI exclusion.
+             */
             .filter(
-              isVisible
+              (
+                option
+              ) =>
+                isVisible(
+                  option
+                ) &&
+                !isExcludedPageUiElement(
+                  option
+                )
             )
             .map(
               (
@@ -1080,6 +1482,7 @@ async function extractRenderedFields(
                   getLabel(
                     option
                   );
+
 
                 return (
                   optionLabel ||
@@ -1098,26 +1501,41 @@ async function extractRenderedFields(
         /*
          * ARIA custom widgets.
          */
+
         const container =
           element.closest(
             '[role="radiogroup"], [role="group"]'
           ) ||
           element;
 
+
         const ariaOptions =
           Array.from(
             container.querySelectorAll(
               [
                 '[role="radio"]',
+
                 '[role="option"]',
+
                 '[role="checkbox"]',
               ].join(
                 ","
               )
             )
           )
+            /*
+             * Same safety rule as native grouped options.
+             */
             .filter(
-              isVisible
+              (
+                option
+              ) =>
+                isVisible(
+                  option
+                ) &&
+                !isExcludedPageUiElement(
+                  option
+                )
             )
             .map(
               (
@@ -1133,6 +1551,7 @@ async function extractRenderedFields(
             .filter(
               Boolean
             );
+
 
         return ariaOptions;
       }
@@ -1178,15 +1597,22 @@ async function extractRenderedFields(
       const selector =
         [
           "input",
+
           "textarea",
+
           "select",
+
           '[role="combobox"]',
+
           '[role="radiogroup"]',
+
           '[role="checkbox"]',
+
           '[contenteditable="true"]',
         ].join(
           ","
         );
+
 
       const elements =
         Array.from(
@@ -1195,13 +1621,16 @@ async function extractRenderedFields(
           )
         );
 
+
       const fields =
         [];
+
 
       /*
        * Used to prevent radio/checkbox groups appearing once per
        * individual option.
        */
+
       const processedGroups =
         new Set();
 
@@ -1210,8 +1639,36 @@ async function extractRenderedFields(
         const element of
         elements
       ) {
+        /*
+         * ------------------------------------------------------
+         * EXISTING VISIBILITY GATE
+         * ------------------------------------------------------
+         */
+
         if (
           !isVisible(
+            element
+          )
+        ) {
+          continue;
+        }
+
+
+        /*
+         * ------------------------------------------------------
+         * EXCLUDE NON-APPLICATION PAGE UI
+         * ------------------------------------------------------
+         *
+         * Cookie/privacy/consent controls must be removed before
+         * grouping, label extraction, option extraction, question
+         * matching, or normalization.
+         *
+         * Everything after this guard remains the original field
+         * inspection flow.
+         */
+
+        if (
+          isExcludedPageUiElement(
             element
           )
         ) {
@@ -1222,6 +1679,7 @@ async function extractRenderedFields(
         const tag =
           element.tagName
             .toLowerCase();
+
 
         const inputType =
           tag ===
@@ -1245,9 +1703,13 @@ async function extractRenderedFields(
         if (
           [
             "hidden",
+
             "submit",
+
             "reset",
+
             "button",
+
             "image",
           ].includes(
             inputType
@@ -1300,6 +1762,7 @@ async function extractRenderedFields(
           const groupKey =
             `${inputType}:${name}`;
 
+
           if (
             processedGroups.has(
               groupKey
@@ -1307,6 +1770,7 @@ async function extractRenderedFields(
           ) {
             continue;
           }
+
 
           processedGroups.add(
             groupKey
@@ -1394,9 +1858,11 @@ async function extractRenderedFields(
             /*
              * Phase 4 Stage 7:
              *
-             * Preserve file-upload restrictions so the interaction layer
-             * can validate an approved document before attaching it.
+             * Preserve file-upload restrictions so the interaction
+             * layer can validate an approved document before
+             * attaching it.
              */
+
             accept:
               clean(
                 element.getAttribute(
@@ -1412,6 +1878,7 @@ async function extractRenderedFields(
           },
         });
       }
+
 
       return fields;
     }
@@ -1434,8 +1901,10 @@ function filterInspectedFields(
     includeUnknownFields,
   } = {
     ...DEFAULT_INSPECTION_OPTIONS,
+
     ...options,
   };
+
 
   return (
     fields || []
@@ -1450,6 +1919,7 @@ function filterInspectedFields(
         return false;
       }
 
+
       if (
         !includeUnknownFields &&
         field.fieldType ===
@@ -1457,6 +1927,7 @@ function filterInspectedFields(
       ) {
         return false;
       }
+
 
       return true;
     }
@@ -1476,6 +1947,7 @@ function buildFieldWarnings(
   const warnings =
     [];
 
+
   const unlabeledFields =
     fields.filter(
       (
@@ -1485,6 +1957,7 @@ function buildFieldWarnings(
           field.label
         )
     );
+
 
   if (
     unlabeledFields.length >
@@ -1505,6 +1978,7 @@ function buildFieldWarnings(
         FIELD_TYPES.UNKNOWN
     );
 
+
   if (
     unknownFields.length >
     0
@@ -1523,6 +1997,7 @@ function buildFieldWarnings(
         field.fieldType ===
         FIELD_TYPES.FILE
     );
+
 
   if (
     fileFields.length >
@@ -1702,6 +2177,7 @@ async function inspectCurrentPage({
     status =
       INSPECTION_STATUSES
         .NEEDS_AUTH;
+
   } else if (
     filteredFields.length ===
       0
@@ -1709,6 +2185,7 @@ async function inspectCurrentPage({
     status =
       INSPECTION_STATUSES
         .PARTIAL;
+
   } else if (
     filteredFields.some(
       (
@@ -1819,6 +2296,7 @@ async function inspectUrl({
    * browserService.navigate() performs the SSRF/network safety
    * checks before navigation.
    */
+
   const navigation =
     await session.navigate(
       url
@@ -1829,6 +2307,7 @@ async function inspectUrl({
    * Give client-side frameworks such as React/Vue/Angular time
    * to render their fields.
    */
+
   await session
     .waitForStability();
 
@@ -1876,6 +2355,7 @@ function getMandatoryReviewReasons(
 ) {
   const reasons =
     [];
+
 
   if (
     !inspection
@@ -1987,36 +2467,53 @@ module.exports = {
   /*
    * Main inspection operations.
    */
+
   inspectCurrentPage,
+
   inspectUrl,
+
 
   /*
    * DOM extraction.
    */
+
   extractRenderedFields,
+
 
   /*
    * Detection helpers.
    */
+
   detectCaptcha,
+
   detectLoginRequirement,
+
   detectMultiStepForm,
+
   detectActionType,
+
 
   /*
    * Evaluation.
    */
+
   getMandatoryReviewReasons,
+
   canResolveFormAnswers,
+
 
   /*
    * Field utilities.
    */
+
   filterInspectedFields,
+
   buildFieldWarnings,
+
 
   /*
    * Configuration.
    */
+
   DEFAULT_INSPECTION_OPTIONS,
 };
